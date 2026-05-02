@@ -1,47 +1,104 @@
 """
-BugHunter - AI Client
-OpenAI-compatible. Sends compact, preprocessed payloads to minimize token usage.
-Multi-agent system: ReconAnalyst | VulnAnalyst | ExploitVerifier | ReportWriter
+EVHunter — AI Client  v2.0
+OpenAI-compatible. Multi-agent system with retry, deterministic caching,
+and graceful fallback for providers that don't support json_object mode.
+
+Agents:
+  recon      — attack surface identification from scan data
+  vuln       — vulnerability identification from tech/endpoint data
+  verifier   — curl response analysis & PoC confirmation
+  reporter   — professional vulnerability report writing
+  subdomain  — sensitive subdomain flagging
+  dns        — DNS anomaly analysis
+  ssl        — SSL/TLS weakness identification
+  cors       — CORS policy evaluation
+  secret     — secret/credential pattern analysis
+  js         — JS endpoint and API key extraction analysis
 """
 
+import hashlib
 import json
 import time
-import urllib.request
 import urllib.error
-from typing import Optional
+import urllib.request
+from typing import Any, Optional
 
 from rich.console import Console
 
 console = Console()
 
-# ── Agent System Prompts (kept very short to save tokens) ─────────────────────
+# ── Agent System Prompts ──────────────────────────────────────────────────────
 
-AGENTS = {
+AGENTS: dict[str, str] = {
     "recon": (
         "You are a senior recon analyst. Given compact scan data, identify "
-        "interesting attack surface, suspicious services, and potential vuln classes. "
-        "Return JSON: {findings:[{type,detail,severity,confidence}], summary:str}. "
-        "Be concise. Severity: critical/high/medium/low/info."
+        "interesting attack surface, suspicious services, and potential vulnerability classes. "
+        "Return ONLY valid JSON: "
+        "{\"findings\":[{\"type\":str,\"detail\":str,\"severity\":str,\"confidence\":int}],"
+        "\"summary\":str}. "
+        "Severity values: critical/high/medium/low/info. Confidence 0-100."
     ),
     "vuln": (
         "You are a vulnerability analyst. Given preprocessed target data, identify "
-        "specific vulnerabilities. Return JSON: "
-        "{vulns:[{title,cve_hint,severity,affected,reasoning,curl_verify}], summary:str}. "
-        "curl_verify must be a real curl command to confirm the vuln."
+        "specific, exploitable vulnerabilities. Return ONLY valid JSON: "
+        "{\"vulns\":[{\"title\":str,\"cve_hint\":str,\"severity\":str,\"affected\":str,"
+        "\"reasoning\":str,\"curl_verify\":str,\"remediation\":str}],\"summary\":str}. "
+        "curl_verify must be a real, executable curl command."
     ),
     "verifier": (
-        "You are an exploit verifier. Given a curl response, decide if the "
-        "vulnerability is confirmed. Return JSON: "
-        "{confirmed:bool,confidence:int,evidence:str,poc:str,false_positive_reason:str}."
+        "You are an exploit verifier. Given a curl HTTP response, determine if the "
+        "vulnerability is confirmed. Return ONLY valid JSON: "
+        "{\"confirmed\":bool,\"confidence\":int,\"evidence\":str,"
+        "\"poc\":str,\"false_positive_reason\":str}. "
+        "confidence is 0-100."
     ),
     "reporter": (
-        "You are a security report writer. Given finding data, write a professional "
-        "vulnerability report section. Return JSON: "
-        "{title,severity,cvss_estimate,description,impact,steps_to_reproduce,curl_poc,remediation}."
+        "You are a professional security report writer. Given finding data, produce a "
+        "detailed vulnerability report section. Return ONLY valid JSON: "
+        "{\"title\":str,\"severity\":str,\"cvss_estimate\":str,\"description\":str,"
+        "\"impact\":str,\"steps_to_reproduce\":str,\"curl_poc\":str,\"remediation\":str,"
+        "\"references\":[str]}."
+    ),
+    "subdomain": (
+        "You are a bug bounty analyst. Flag subdomains hinting at sensitive services "
+        "(staging, admin, internal, jenkins, grafana, kibana, jira, gitlab, etc.). "
+        "Return ONLY valid JSON: {\"flagged\":[{\"subdomain\":str,\"reason\":str,\"severity\":str}]}."
+    ),
+    "dns": (
+        "You are a DNS security analyst. Analyze DNS records for security issues "
+        "(SPF/DMARC misconfigs, dangling CNAMEs, zone transfer exposure, internal hostnames leaked). "
+        "Return ONLY valid JSON: "
+        "{\"issues\":[{\"type\":str,\"record\":str,\"detail\":str,\"severity\":str}],\"summary\":str}."
+    ),
+    "ssl": (
+        "You are a TLS/SSL security expert. Analyze certificate and cipher data for weaknesses "
+        "(expired certs, weak ciphers, missing HSTS, self-signed, wildcard abuse, etc.). "
+        "Return ONLY valid JSON: "
+        "{\"issues\":[{\"type\":str,\"detail\":str,\"severity\":str}],\"grade\":str,\"summary\":str}."
+    ),
+    "cors": (
+        "You are a web security analyst specializing in CORS. Evaluate CORS headers for "
+        "misconfigurations (wildcard origins, null origin, credentials+wildcard, etc.). "
+        "Return ONLY valid JSON: "
+        "{\"vulnerable\":bool,\"issues\":[{\"header\":str,\"value\":str,\"detail\":str,\"severity\":str}],"
+        "\"summary\":str}."
+    ),
+    "secret": (
+        "You are a secrets detection analyst. Given response snippets, identify exposed secrets, "
+        "tokens, API keys, passwords, or PII patterns. "
+        "Return ONLY valid JSON: "
+        "{\"secrets\":[{\"type\":str,\"pattern\":str,\"context\":str,\"severity\":str}],\"summary\":str}."
+    ),
+    "js": (
+        "You are a JavaScript security analyst. Given JS code snippets and found strings, "
+        "extract and flag: API endpoints, hardcoded credentials, internal URLs, GraphQL queries, "
+        "cloud storage buckets, JWT secrets. "
+        "Return ONLY valid JSON: "
+        "{\"endpoints\":[str],\"secrets\":[{\"type\":str,\"value\":str,\"severity\":str}],"
+        "\"interesting\":[str],\"summary\":str}."
     ),
 }
 
-# ── Severity color map ─────────────────────────────────────────────────────────
 SEV_COLORS = {
     "critical": "bold red",
     "high":     "red",
@@ -52,35 +109,54 @@ SEV_COLORS = {
 
 
 class AIClient:
-    def __init__(self, api_url: str, api_key: str, model: str):
-        self.api_url = api_url.rstrip("/")
-        self.api_key = api_key
-        self.model   = model
-        self._cache: dict = {}
+    def __init__(self, api_url: str, api_key: str, model: str,
+                 max_retries: int = 3, retry_delay: float = 2.0):
+        self.api_url     = api_url.rstrip("/")
+        self.api_key     = api_key
+        self.model       = model
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self._cache: dict[str, Any] = {}
+        # Detect provider capabilities
+        self._json_mode = self._probe_json_mode()
 
-    def _call(self, system: str, user_payload: dict, max_tokens: int = 800) -> Optional[dict]:
-        """
-        Make a single API call. Returns parsed JSON or None on error.
-        Payload is always a compact JSON string to minimize tokens.
-        """
-        user_msg = json.dumps(user_payload, separators=(",", ":"))
+    def _probe_json_mode(self) -> bool:
+        """Check if this provider supports response_format json_object."""
+        # Providers known to NOT support it
+        no_json_mode = ["ollama", "groq", "together", "localhost", "127.0.0.1"]
+        return not any(p in self.api_url.lower() for p in no_json_mode)
 
-        cache_key = hash(system + user_msg)
+    def _cache_key(self, system: str, payload: dict) -> str:
+        """Deterministic SHA256-based cache key."""
+        raw = system + json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _call(self, system: str, user_payload: dict,
+              max_tokens: int = 800) -> Optional[dict]:
+        """
+        Make an AI API call with retry and fallback JSON extraction.
+        Returns parsed dict or None on failure.
+        """
+        user_msg  = json.dumps(user_payload, separators=(",", ":"))
+        cache_key = self._cache_key(system, user_payload)
+
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        body = json.dumps({
-            "model": self.model,
-            "max_tokens": max_tokens,
+        body_dict: dict = {
+            "model":       self.model,
+            "max_tokens":  max_tokens,
             "temperature": 0.1,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user_msg},
             ],
-            "response_format": {"type": "json_object"},
-        }).encode()
+        }
+        if self._json_mode:
+            body_dict["response_format"] = {"type": "json_object"}
 
-        req = urllib.request.Request(
+        body = json.dumps(body_dict).encode()
+        req  = urllib.request.Request(
             f"{self.api_url}/chat/completions",
             data=body,
             headers={
@@ -90,67 +166,105 @@ class AIClient:
             method="POST",
         )
 
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read())
-                text = data["choices"][0]["message"]["content"]
-                result = json.loads(text)
-                self._cache[cache_key] = result
-                return result
-        except urllib.error.HTTPError as e:
-            console.print(f"[red]  AI API error {e.code}: {e.read().decode()[:200]}[/red]")
-        except Exception as e:
-            console.print(f"[red]  AI call failed: {e}[/red]")
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read())
+                    text = data["choices"][0]["message"]["content"]
+                    result = self._parse_json(text)
+                    if result is not None:
+                        self._cache[cache_key] = result
+                        return result
+                    console.print(f"  [yellow]  AI response not valid JSON (attempt {attempt})[/yellow]")
+            except urllib.error.HTTPError as e:
+                body_err = e.read().decode()[:300]
+                console.print(f"  [red]  AI HTTP {e.code} (attempt {attempt}): {body_err}[/red]")
+                # Don't retry on auth errors
+                if e.code in (401, 403):
+                    return None
+            except urllib.error.URLError as e:
+                console.print(f"  [red]  AI connection error (attempt {attempt}): {e.reason}[/red]")
+            except Exception as e:
+                console.print(f"  [red]  AI call failed (attempt {attempt}): {e}[/red]")
+
+            if attempt < self.max_retries:
+                time.sleep(self.retry_delay * attempt)
+
         return None
 
-    # ── Public agent methods ───────────────────────────────────────────────────
+    @staticmethod
+    def _parse_json(text: str) -> Optional[dict]:
+        """Extract JSON from model response, handling markdown fences."""
+        text = text.strip()
+        # Strip ```json ... ``` fences
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Try to find the first JSON object in the string
+            import re
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except Exception:
+                    pass
+        return None
+
+    # ── Public Agent Methods ───────────────────────────────────────────────────
 
     def analyze_recon(self, nmap_summary: dict, subdomains: list[str]) -> Optional[dict]:
-        """ReconAnalyst — identify attack surface from compact nmap + subdomain data."""
-        payload = {
-            "nmap": nmap_summary,
-            "subdomains_sample": subdomains[:30],  # cap to save tokens
-        }
-        return self._call(AGENTS["recon"], payload, max_tokens=600)
+        payload = {"nmap": nmap_summary, "subdomains_sample": subdomains[:30]}
+        return self._call(AGENTS["recon"], payload, max_tokens=700)
 
     def analyze_vulns(self, target: str, tech_stack: list, endpoints: list,
                       nuclei_hits: list, headers: dict) -> Optional[dict]:
-        """VulnAnalyst — identify specific vulnerabilities."""
         payload = {
             "target":      target,
-            "tech":        tech_stack[:10],
-            "endpoints":   endpoints[:20],
+            "tech":        tech_stack[:12],
+            "endpoints":   endpoints[:25],
             "nuclei_hits": nuclei_hits[:15],
-            "headers":     {k: v for k, v in list(headers.items())[:8]},
+            "headers":     dict(list(headers.items())[:10]),
         }
-        return self._call(AGENTS["vuln"], payload, max_tokens=900)
+        return self._call(AGENTS["vuln"], payload, max_tokens=1000)
 
     def verify_finding(self, vuln_title: str, curl_response: str,
                        status_code: int, response_time_ms: int) -> Optional[dict]:
-        """ExploitVerifier — confirm if curl response proves the vulnerability."""
         payload = {
-            "vuln":        vuln_title,
-            "status":      status_code,
+            "vuln":         vuln_title,
+            "status":       status_code,
             "resp_time_ms": response_time_ms,
-            "body_snippet": curl_response[:400],  # only a snippet
+            "body_snippet": curl_response[:500],
         }
         return self._call(AGENTS["verifier"], payload, max_tokens=500)
 
     def write_report(self, finding: dict) -> Optional[dict]:
-        """ReportWriter — generate a professional vuln report section."""
-        return self._call(AGENTS["reporter"], finding, max_tokens=700)
+        return self._call(AGENTS["reporter"], finding, max_tokens=800)
 
     def analyze_subdomains(self, subdomains: list[str]) -> Optional[dict]:
-        """Quick AI pass to flag sensitive-looking subdomains."""
-        system = (
-            "You are a bug bounty analyst. Flag subdomains that hint at sensitive "
-            "services (staging, admin, internal, jenkins, grafana, etc.). "
-            "Return JSON: {flagged:[{subdomain,reason,severity}]}."
-        )
-        payload = {"subdomains": subdomains[:50]}
-        return self._call(system, payload, max_tokens=500)
+        return self._call(AGENTS["subdomain"], {"subdomains": subdomains[:60]}, max_tokens=600)
+
+    def analyze_dns(self, dns_data: dict) -> Optional[dict]:
+        return self._call(AGENTS["dns"], dns_data, max_tokens=600)
+
+    def analyze_ssl(self, ssl_data: dict) -> Optional[dict]:
+        return self._call(AGENTS["ssl"], ssl_data, max_tokens=600)
+
+    def analyze_cors(self, cors_data: dict) -> Optional[dict]:
+        return self._call(AGENTS["cors"], cors_data, max_tokens=500)
+
+    def analyze_secrets(self, snippets: list[dict]) -> Optional[dict]:
+        payload = {"snippets": snippets[:20]}
+        return self._call(AGENTS["secret"], payload, max_tokens=600)
+
+    def analyze_js(self, js_data: dict) -> Optional[dict]:
+        return self._call(AGENTS["js"], js_data, max_tokens=700)
 
     def test_connection(self) -> bool:
-        """Quick connectivity test."""
-        result = self._call("Reply only with: {\"ok\":true}", {"ping": 1}, max_tokens=10)
-        return result is not None
+        result = self._call(
+            'Reply ONLY with this exact JSON: {"ok":true}',
+            {"ping": 1}, max_tokens=20
+        )
+        return result is not None and result.get("ok") is True
