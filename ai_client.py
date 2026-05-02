@@ -193,62 +193,84 @@ class AIClient:
         return None
 
     @staticmethod
-  def _parse_json(text: str) -> Optional[dict]:
-      text = text.strip()
-      # Remove code fences if present
-      if text.startswith("```"):
-          lines = text.splitlines()
-          text = "\n".join(lines[1:]) if len(lines) > 1 else text
-          if text.endswith("```"):
-              text = text[:-3].strip()
-  
-    # Try direct parse first (fast path)
-      try:
-          return json.loads(text)
-      except json.JSONDecodeError:
-          pass
+    def _parse_json(text: str) -> Optional[dict]:
+        text = text.strip()
 
-      # Stack-based extraction of the first balanced JSON block
-      start_idx = -1
-      brace_count = bracket_count = 0
-      in_string = False
-      escaped = False
-      for i, ch in enumerate(text):
-          if escaped:
-              escaped = False
-              continue
-          if in_string:
-              if ch == '\\':
-                  escaped = True
-              elif ch == '"':
-                  in_string = False
-              continue
-          if ch == '"':
-              in_string = True
-              continue
-          if ch in '{[':
-              if start_idx == -1:
-                  start_idx = i
-              if ch == '{':
-                  brace_count += 1
-              else:
-                  bracket_count += 1
-          elif ch in '}]':
-              if ch == '}':
-                  if brace_count > 0:
-                      brace_count -= 1
-              else:
-                  if bracket_count > 0:
-                      bracket_count -= 1
-              if start_idx != -1 and brace_count == 0 and bracket_count == 0:
-                  candidate = text[start_idx:i+1]
-                  try:
-                      return json.loads(candidate)
-                  except json.JSONDecodeError:
-                      # This shouldn't happen if balanced, but fall through
-                      start_idx = -1   # reset and keep looking
-                      brace_count = bracket_count = 0
-      return None
+        # Remove code fences if present
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(lines[1:]) if len(lines) > 1 else text
+
+            if text.endswith("```"):
+                text = text[:-3].strip()
+
+        # Try direct parse first
+        try:
+            return json.loads(text)
+
+        except json.JSONDecodeError:
+            pass
+
+        # Extract first balanced JSON block
+        start_idx = -1
+        brace_count = 0
+        bracket_count = 0
+        in_string = False
+        escaped = False
+
+        for i, ch in enumerate(text):
+
+            if escaped:
+                escaped = False
+                continue
+
+            if in_string:
+                if ch == "\\":
+                    escaped = True
+
+                elif ch == '"':
+                    in_string = False
+
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+
+            if ch in "{[":
+                if start_idx == -1:
+                    start_idx = i
+
+                if ch == "{":
+                    brace_count += 1
+                else:
+                    bracket_count += 1
+
+            elif ch in "}]":
+
+                if ch == "}":
+                    if brace_count > 0:
+                        brace_count -= 1
+                else:
+                    if bracket_count > 0:
+                        bracket_count -= 1
+
+                if (
+                    start_idx != -1
+                    and brace_count == 0
+                    and bracket_count == 0
+                ):
+                    candidate = text[start_idx:i + 1]
+
+                    try:
+                        return json.loads(candidate)
+
+                    except json.JSONDecodeError:
+                        start_idx = -1
+                        brace_count = 0
+                        bracket_count = 0
+
+        return None
 
     # ── Public Agent Methods ───────────────────────────────────────────────────
 
