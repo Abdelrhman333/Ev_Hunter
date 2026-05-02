@@ -1,4 +1,4 @@
-# 🔴 BugHunter — AI-Augmented Bug Hunter Framework
+# 🔴 EVHunter — AI-Augmented Bug Hunter Framework
 > Low-Token Edition | v1.0
 
 An organized, AI-powered CLI bug hunting framework that combines industry-standard
