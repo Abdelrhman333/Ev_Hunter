@@ -147,3 +147,5 @@ bughunter/
 ├── requirements.txt
 └── install.sh
 ```
+
+### This tool is AI generated
