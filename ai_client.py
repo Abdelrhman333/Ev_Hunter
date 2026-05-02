@@ -201,12 +201,24 @@ class AIClient:
                         f"  [yellow]  AI response not valid JSON (attempt {attempt})[/yellow]"
                     )
                     if attempt == self.max_retries:
-                        console.print(f"  [dim]  Raw response: {text[:200]}[/dim]")
+                        # Show first 300 chars to help diagnose truncation vs bad format
+                        preview = text[:300].replace("\n", " ")
+                        console.print(f"  [dim]  Raw response: {preview}[/dim]")
+                        if len(text) >= max_tokens * 3:  # rough char estimate
+                            console.print(
+                                "  [dim]  Response may be truncated — max_tokens too low[/dim]"
+                            )
             except urllib.error.HTTPError as e:
                 body_err = e.read().decode()[:300]
                 console.print(f"  [red]  AI HTTP {e.code} (attempt {attempt}): {body_err}[/red]")
                 if e.code in (401, 403):
                     return None
+                if e.code == 429:
+                    # Rate limit — wait much longer before retrying
+                    wait = self.retry_delay * (attempt * 10)
+                    console.print(f"  [yellow]  Rate limited — waiting {wait:.0f}s…[/yellow]")
+                    time.sleep(wait)
+                    continue
             except urllib.error.URLError as e:
                 console.print(f"  [red]  AI connection error (attempt {attempt}): {e.reason}[/red]")
             except Exception as e:
@@ -293,7 +305,7 @@ class AIClient:
 
     def analyze_recon(self, nmap_summary: dict, subdomains: list[str]) -> Optional[dict]:
         payload = {"nmap": nmap_summary, "subdomains_sample": subdomains[:30]}
-        return self._call(AGENTS["recon"], payload, max_tokens=700)
+        return self._call(AGENTS["recon"], payload, max_tokens=2000)
 
     def analyze_vulns(self, target: str, tech_stack: list, endpoints: list,
                       nuclei_hits: list, headers: dict) -> Optional[dict]:
@@ -304,7 +316,7 @@ class AIClient:
             "nuclei_hits": nuclei_hits[:15],
             "headers":     dict(list(headers.items())[:10]),
         }
-        return self._call(AGENTS["vuln"], payload, max_tokens=1000)
+        return self._call(AGENTS["vuln"], payload, max_tokens=3000)
 
     def verify_finding(self, vuln_title: str, curl_response: str,
                        status_code: int, response_time_ms: int) -> Optional[dict]:
@@ -314,29 +326,29 @@ class AIClient:
             "resp_time_ms": response_time_ms,
             "body_snippet": curl_response[:500],
         }
-        return self._call(AGENTS["verifier"], payload, max_tokens=500)
+        return self._call(AGENTS["verifier"], payload, max_tokens=1000)
 
     def write_report(self, finding: dict) -> Optional[dict]:
-        return self._call(AGENTS["reporter"], finding, max_tokens=800)
+        return self._call(AGENTS["reporter"], finding, max_tokens=2000)
 
     def analyze_subdomains(self, subdomains: list[str]) -> Optional[dict]:
-        return self._call(AGENTS["subdomain"], {"subdomains": subdomains[:60]}, max_tokens=600)
+        return self._call(AGENTS["subdomain"], {"subdomains": subdomains[:60]}, max_tokens=2000)
 
     def analyze_dns(self, dns_data: dict) -> Optional[dict]:
-        return self._call(AGENTS["dns"], dns_data, max_tokens=600)
+        return self._call(AGENTS["dns"], dns_data, max_tokens=2000)
 
     def analyze_ssl(self, ssl_data: dict) -> Optional[dict]:
-        return self._call(AGENTS["ssl"], ssl_data, max_tokens=600)
+        return self._call(AGENTS["ssl"], ssl_data, max_tokens=2000)
 
     def analyze_cors(self, cors_data: dict) -> Optional[dict]:
-        return self._call(AGENTS["cors"], cors_data, max_tokens=500)
+        return self._call(AGENTS["cors"], cors_data, max_tokens=1500)
 
     def analyze_secrets(self, snippets: list[dict]) -> Optional[dict]:
         payload = {"snippets": snippets[:20]}
-        return self._call(AGENTS["secret"], payload, max_tokens=600)
+        return self._call(AGENTS["secret"], payload, max_tokens=2000)
 
     def analyze_js(self, js_data: dict) -> Optional[dict]:
-        return self._call(AGENTS["js"], js_data, max_tokens=700)
+        return self._call(AGENTS["js"], js_data, max_tokens=2000)
 
     def test_connection(self) -> bool:
         result = self._call(
