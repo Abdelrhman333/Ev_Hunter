@@ -232,34 +232,48 @@ class AIClient:
     @staticmethod
     def _parse_json(text: str) -> Optional[dict]:
         """
-        Parse JSON from AI response, handling:
-          - Bare JSON objects/arrays
-          - ```json ... ``` fences
-          - ``` ... ``` fences (no language tag)
-          - Leading/trailing prose before/after the JSON
+        Parse JSON from AI response, handling every fence style Gemini produces:
+
+          Style 1 — fence on its own line (standard):
+            ```json
+            { ... }
+            ```
+
+          Style 2 — JSON starts on the same line as the fence (Gemini quirk):
+            ```json { ... } ```
+
+          Style 3 — no fence, bare JSON
+
+          Style 4 — prose before/after the JSON block
+
+        Strategy:
+          1. Strip ALL occurrences of opening/closing fence markers with regex
+             so we never accidentally discard content that shares a line with a fence.
+          2. Fast-path: try json.loads on the cleaned text.
+          3. Fallback: char-by-char scanner to find the first complete { } or [ ]
+             block — handles leading prose, trailing prose, or partial wrapping.
         """
         if not text:
             return None
 
         text = text.strip()
 
-        # Strip markdown code fences (with or without language tag)
-        if text.startswith("```"):
-            lines = text.splitlines()
-            # Drop the opening fence line (```json or ```)
-            inner = lines[1:] if len(lines) > 1 else lines
-            # Drop closing fence if present
-            if inner and inner[-1].strip() == "```":
-                inner = inner[:-1]
-            text = "\n".join(inner).strip()
+        # ── Step 1: strip markdown fences ─────────────────────────────────────
+        # Opening fence: ```json  or  ```JSON  or  ``` (with optional trailing space)
+        # These may appear mid-line, so use re.sub instead of startswith/splitlines.
+        text = re.sub(r"```[a-zA-Z]*\s*", "", text)
+        # Closing fence: standalone ```
+        text = re.sub(r"```", "", text)
+        text = text.strip()
 
-        # Fast path: direct parse
+        # ── Step 2: fast-path direct parse ────────────────────────────────────
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
 
-        # Extract first balanced JSON object or array using a char-by-char scanner
+        # ── Step 3: char-by-char balanced-brace scanner ───────────────────────
+        # Finds the first complete JSON object or array, ignoring surrounding prose.
         start       = -1
         brace_cnt   = 0
         bracket_cnt = 0
@@ -296,7 +310,7 @@ class AIClient:
                     try:
                         return json.loads(candidate)
                     except json.JSONDecodeError:
-                        # Reset and keep searching
+                        # This balanced block wasn't valid JSON — keep scanning
                         start = brace_cnt = bracket_cnt = 0
 
         return None
