@@ -78,7 +78,7 @@ BANNER = """
 def _print_banner():
     console.print(Text(BANNER, style="bold cyan"))
     console.print(
-        "  [dim]AI-Augmented Bug Hunter Framework  |  v2.1  |  Multi-Module Edition[/dim]\n"
+        "  [dim]AI-Augmented Bug Hunter Framework  |  v1.0  "
     )
 
 
