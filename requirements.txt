@@ -1,5 +1,19 @@
-# BugHunter — Python Dependencies
+# EVHunter — Python Dependencies
 # Install with: pip install -r requirements.txt
-
-rich>=13.0.0
+ 
+# Core UI
+rich>=13.7.0
 typer>=0.12.0
+ 
+# HTTP
+httpx>=0.27.0          # async-capable, proper response parsing
+ 
+# Async
+anyio>=4.0.0
+ 
+# Reporting
+markdown>=3.6          # proper markdown → HTML conversion
+ 
+# Optional: faster JSON
+orjson>=3.10.0
+ 
