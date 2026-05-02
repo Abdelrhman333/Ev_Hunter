@@ -145,7 +145,7 @@ class AIClient:
 
         body_dict: dict = {
             "model":       self.model,
-            "max_tokens":  max_tokens,
+            "max_completion_tokens": max_tokens,
             "temperature": 0.1,
             "messages": [
                 {"role": "system", "content": system},
