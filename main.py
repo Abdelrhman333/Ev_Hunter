@@ -107,7 +107,6 @@ def _severity_panel(findings: list[dict]):
     ))
 
 
-# ── Commands ──────────────────────────────────────────────────────────────────
 
 @app.command()
 def configure():
@@ -140,7 +139,6 @@ def recon(
     proxy       = cfg.get("proxy", "")
     concurrency = cfg.get("concurrency", 20)
 
-    # ── Scope check ───────────────────────────────────────────────────────────
     console.print(Panel(
         f"[bold]Target:[/bold] [cyan]{target}[/cyan]\n"
         f"[bold]Mode:[/bold]   Recon\n"
@@ -158,7 +156,7 @@ def recon(
 
     scan_id       = db.new_scan(target, "recon")
     all_findings: list[dict] = []
-    scan_notes:   dict       = {}          # populated by each module, passed to report
+    scan_notes:   dict       = {}         
 
     # ═══════════════════════════════════════════════════════════════════════════
     _section("STEP 1 — Port Scan (nmap)")
