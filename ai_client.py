@@ -1,5 +1,5 @@
 """
-EVHunter — AI Client  v2.0
+EVHunter — AI Client  v2.1
 OpenAI-compatible. Multi-agent system with retry, deterministic caching,
 and graceful fallback for providers that don't support json_object mode.
 
@@ -14,10 +14,17 @@ Agents:
   cors       — CORS policy evaluation
   secret     — secret/credential pattern analysis
   js         — JS endpoint and API key extraction analysis
+
+Fixes v2.1:
+  - max_completion_tokens → max_tokens (Gemini + broader compatibility)
+  - Added Gemini / Google AI URLs to no-JSON-mode list
+  - Moved misplaced `import re, json` out of class body
+  - Improved _parse_json to strip more wrapping variants
 """
 
 import hashlib
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -107,6 +114,16 @@ SEV_COLORS = {
     "info":     "dim",
 }
 
+# Providers / URL substrings that do NOT support response_format=json_object
+_NO_JSON_MODE_PROVIDERS = [
+    "ollama", "groq", "together", "localhost", "127.0.0.1",
+    # Gemini / Google AI variants
+    "generativelanguage.googleapis.com",
+    "aistudio.google.com",
+    "gemini",
+    "google",
+]
+
 
 class AIClient:
     def __init__(self, api_url: str, api_key: str, model: str,
@@ -117,14 +134,17 @@ class AIClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self._cache: dict[str, Any] = {}
-        # Detect provider capabilities
+        # Detect provider capabilities once at init
         self._json_mode = self._probe_json_mode()
 
     def _probe_json_mode(self) -> bool:
-        """Check if this provider supports response_format json_object."""
-        # Providers known to NOT support it
-        no_json_mode = ["ollama", "groq", "together", "localhost", "127.0.0.1"]
-        return not any(p in self.api_url.lower() for p in no_json_mode)
+        """Return True only if this provider supports response_format=json_object."""
+        url_lower   = self.api_url.lower()
+        model_lower = self.model.lower()
+        for marker in _NO_JSON_MODE_PROVIDERS:
+            if marker in url_lower or marker in model_lower:
+                return False
+        return True
 
     def _cache_key(self, system: str, payload: dict) -> str:
         """Deterministic SHA256-based cache key."""
@@ -143,15 +163,17 @@ class AIClient:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
+        # FIX: use max_tokens (universally supported) instead of max_completion_tokens
         body_dict: dict = {
             "model":       self.model,
-            "max_completion_tokens": max_tokens,
+            "max_tokens":  max_tokens,
             "temperature": 0.1,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user_msg},
             ],
         }
+        # Only add response_format for providers that support it
         if self._json_mode:
             body_dict["response_format"] = {"type": "json_object"}
 
@@ -169,17 +191,20 @@ class AIClient:
         for attempt in range(1, self.max_retries + 1):
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = json.loads(resp.read())
-                    text = data["choices"][0]["message"]["content"]
+                    data   = json.loads(resp.read())
+                    text   = data["choices"][0]["message"]["content"]
                     result = self._parse_json(text)
                     if result is not None:
                         self._cache[cache_key] = result
                         return result
-                    console.print(f"  [yellow]  AI response not valid JSON (attempt {attempt})[/yellow]")
+                    console.print(
+                        f"  [yellow]  AI response not valid JSON (attempt {attempt})[/yellow]"
+                    )
+                    if attempt == self.max_retries:
+                        console.print(f"  [dim]  Raw response: {text[:200]}[/dim]")
             except urllib.error.HTTPError as e:
                 body_err = e.read().decode()[:300]
                 console.print(f"  [red]  AI HTTP {e.code} (attempt {attempt}): {body_err}[/red]")
-                # Don't retry on auth errors
                 if e.code in (401, 403):
                     return None
             except urllib.error.URLError as e:
@@ -192,35 +217,49 @@ class AIClient:
 
         return None
 
-    import re, json
-
     @staticmethod
     def _parse_json(text: str) -> Optional[dict]:
+        """
+        Parse JSON from AI response, handling:
+          - Bare JSON objects/arrays
+          - ```json ... ``` fences
+          - ``` ... ``` fences (no language tag)
+          - Leading/trailing prose before/after the JSON
+        """
+        if not text:
+            return None
+
         text = text.strip()
-    # Strip markdown code fences if present
+
+        # Strip markdown code fences (with or without language tag)
         if text.startswith("```"):
             lines = text.splitlines()
-            text = "\n".join(lines[1:]) if len(lines) > 1 else text
-            if text.endswith("```"):
-                text = text[:-3].strip()
+            # Drop the opening fence line (```json or ```)
+            inner = lines[1:] if len(lines) > 1 else lines
+            # Drop closing fence if present
+            if inner and inner[-1].strip() == "```":
+                inner = inner[:-1]
+            text = "\n".join(inner).strip()
 
-    # Fast direct parse
+        # Fast path: direct parse
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
 
-    # Extract first balanced JSON object/array
-        start = -1
-        brace_cnt = bracket_cnt = 0
-        in_string = False
-        escaped = False
+        # Extract first balanced JSON object or array using a char-by-char scanner
+        start       = -1
+        brace_cnt   = 0
+        bracket_cnt = 0
+        in_string   = False
+        escaped     = False
+
         for i, ch in enumerate(text):
             if escaped:
                 escaped = False
                 continue
             if in_string:
-                if ch == '\\':
+                if ch == "\\":
                     escaped = True
                 elif ch == '"':
                     in_string = False
@@ -228,28 +267,27 @@ class AIClient:
             if ch == '"':
                 in_string = True
                 continue
-            if ch in '{[':
+            if ch in "{[":
                 if start == -1:
                     start = i
-                if ch == '{':
+                if ch == "{":
                     brace_cnt += 1
                 else:
                     bracket_cnt += 1
-            elif ch in '}]':
-                if ch == '}':
+            elif ch in "}]":
+                if ch == "}":
                     brace_cnt -= 1
                 else:
                     bracket_cnt -= 1
                 if start != -1 and brace_cnt == 0 and bracket_cnt == 0:
-                    candidate = text[start:i+1]
+                    candidate = text[start : i + 1]
                     try:
                         return json.loads(candidate)
                     except json.JSONDecodeError:
-                        # reset and keep looking (should not happen if balanced)
-                        start = -1
-                        brace_cnt = bracket_cnt = 0
-        return None
+                        # Reset and keep searching
+                        start = brace_cnt = bracket_cnt = 0
 
+        return None
 
     # ── Public Agent Methods ───────────────────────────────────────────────────
 
