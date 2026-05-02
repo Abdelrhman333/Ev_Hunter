@@ -9,7 +9,7 @@ Improvements vs original:
   - JSON export
   - Timeline of scan events
 """
-
+import re
 import json
 import time
 from pathlib import Path
