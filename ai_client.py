@@ -192,85 +192,64 @@ class AIClient:
 
         return None
 
+    import re, json
+
     @staticmethod
     def _parse_json(text: str) -> Optional[dict]:
         text = text.strip()
-
-        # Remove code fences if present
+    # Strip markdown code fences if present
         if text.startswith("```"):
             lines = text.splitlines()
             text = "\n".join(lines[1:]) if len(lines) > 1 else text
-
             if text.endswith("```"):
                 text = text[:-3].strip()
 
-        # Try direct parse first
+    # Fast direct parse
         try:
             return json.loads(text)
-
         except json.JSONDecodeError:
             pass
 
-        # Extract first balanced JSON block
-        start_idx = -1
-        brace_count = 0
-        bracket_count = 0
+    # Extract first balanced JSON object/array
+        start = -1
+        brace_cnt = bracket_cnt = 0
         in_string = False
         escaped = False
-
         for i, ch in enumerate(text):
-
             if escaped:
                 escaped = False
                 continue
-
             if in_string:
-                if ch == "\\":
+                if ch == '\\':
                     escaped = True
-
                 elif ch == '"':
                     in_string = False
-
                 continue
-
             if ch == '"':
                 in_string = True
                 continue
-
-            if ch in "{[":
-                if start_idx == -1:
-                    start_idx = i
-
-                if ch == "{":
-                    brace_count += 1
+            if ch in '{[':
+                if start == -1:
+                    start = i
+                if ch == '{':
+                    brace_cnt += 1
                 else:
-                    bracket_count += 1
-
-            elif ch in "}]":
-
-                if ch == "}":
-                    if brace_count > 0:
-                        brace_count -= 1
+                    bracket_cnt += 1
+            elif ch in '}]':
+                if ch == '}':
+                    brace_cnt -= 1
                 else:
-                    if bracket_count > 0:
-                        bracket_count -= 1
-
-                if (
-                    start_idx != -1
-                    and brace_count == 0
-                    and bracket_count == 0
-                ):
-                    candidate = text[start_idx:i + 1]
-
+                    bracket_cnt -= 1
+                if start != -1 and brace_cnt == 0 and bracket_cnt == 0:
+                    candidate = text[start:i+1]
                     try:
                         return json.loads(candidate)
-
                     except json.JSONDecodeError:
-                        start_idx = -1
-                        brace_count = 0
-                        bracket_count = 0
-
+                        # reset and keep looking (should not happen if balanced)
+                        start = -1
+                        brace_cnt = bracket_cnt = 0
         return None
+
 
     # ── Public Agent Methods ───────────────────────────────────────────────────
 
